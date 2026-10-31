@@ -2,7 +2,8 @@
 
 The Hosting Module is sold through the licence server. This file only:
   - gives this server an identity (server_id + a secret, created once in data/licence/)
-  - starts a checkout, picks up the licence after payment, activates a key, checks in
+  - places a PayPal order (new licences or a renewal), picks up the licence after payment,
+    asks for the licence linked to this server's IP, activates a key, checks in
   - keeps the last signed answer and checks its Ed25519 signature offline against the
     public key(s) shipped in panel/trust/licence.json, so the panel keeps working for
     the grace period when the licence server cannot be reached
@@ -24,6 +25,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 PANEL_DIR = '/opt/vortexpanel'
@@ -160,7 +162,8 @@ def current(now=None):
            'status': 'none', 'status_text': 'No licence', 'kind': '', 'period': '', 'period_end': 0,
            'valid_until': 0, 'refresh_after': 0, 'email': '', 'module_latest': '',
            'last_ok': st.get('last_ok') or 0, 'last_error': st.get('last_error') or '',
-           'last_error_at': st.get('last_error_at') or 0, 'offline': False, 'checkout': st.get('checkout') or None}
+           'last_error_at': st.get('last_error_at') or 0, 'offline': False, 'checkout': st.get('checkout') or None,
+           'linked_ip': '', 'months': 0, 'source': ''}
     if not payload:
         if st.get('token'):
             out.update(status='invalid', status_text='The stored licence is not signed by the licence server')
@@ -172,7 +175,8 @@ def current(now=None):
                kind=payload.get('kind') or '', period=payload.get('period') or '',
                period_end=payload.get('period_end') or 0, valid_until=payload.get('valid_until') or 0,
                refresh_after=payload.get('refresh_after') or 0, email=payload.get('email') or '',
-               module_latest=payload.get('module_latest') or '')
+               module_latest=payload.get('module_latest') or '', linked_ip=payload.get('linked_ip') or '',
+               months=payload.get('months') or 0, source=payload.get('source') or '')
     in_time = now < (payload.get('valid_until') or 0)
     out['licensed'] = bool(payload.get('valid')) and in_time and MODULE in (payload.get('features') or [])
     if payload.get('valid') and not in_time:
@@ -212,9 +216,33 @@ def _server_info():
             'module_version': module_version}
 
 
+_V4 = threading.local()
+
+
+def _ipv4_first():
+    """Licences are linked to the address this server connects from. When the licence server has
+    an IPv4 address, talk to it over IPv4 so a dual-stack server always shows the same address
+    (only for this thread's requests to the licence server)."""
+    try:
+        import urllib3.util.connection as uc
+        if not getattr(uc, '_vp_licence_patch', False):
+            orig = uc.allowed_gai_family
+
+            def family():
+                return socket.AF_INET if getattr(_V4, 'on', False) else orig()
+            uc.allowed_gai_family = family
+            uc._vp_licence_patch = True
+        from urllib.parse import urlsplit
+        host = urlsplit(trust()['server']).hostname or ''
+        _V4.on = bool(host) and bool(socket.getaddrinfo(host, 443, socket.AF_INET))
+    except Exception:  # noqa: BLE001 - no IPv4 address (IPv6-only): the normal order applies
+        _V4.on = False
+
+
 def _call(method, path, body=None):
     import requests
     server = trust()['server']
+    _ipv4_first()
     if not server.startswith(('https://', 'http://127.0.0.1', 'http://localhost')):
         raise LicenceError('The licence server address is not set in this panel version.', 'no_server', 503)
     try:
@@ -250,20 +278,44 @@ def plans():
     return _call('GET', '/api/v1/plans')
 
 
-def start_checkout(plan, email, coupon=''):
-    body = dict(_server_info(), plan=plan, email=email, coupon=coupon)
-    data = _call('POST', '/api/v1/checkout', body)
-    _save_state(checkout={'intent_id': data['intent_id'], 'plan': plan, 'email': email, 'started': int(time.time())})
-    return data['checkout_url']
+def order(email, months, quantity=1, ips=None, kind='new'):
+    """Place a PayPal order on the licence server. Returns its answer (approve_url, total ...)."""
+    body = dict(_server_info(), email=email, months=months, quantity=quantity, ips=list(ips or [])[:500],
+                kind='renew' if kind == 'renew' else 'new')
+    data = _call('POST', '/api/v1/order', body)
+    from urllib.parse import urlsplit
+    url = str(data.get('approve_url') or '')
+    if urlsplit(url).scheme != 'https' or urlsplit(url).hostname not in ('www.paypal.com', 'www.sandbox.paypal.com'):
+        raise LicenceError('The licence server sent an unexpected payment address.', 'bad_answer', 502)
+    _save_state(checkout={'order_id': data['order_id'], 'approve_url': url, 'kind': data.get('kind') or kind,
+                          'total': data.get('total'), 'currency': data.get('currency'),
+                          'quantity': data.get('quantity'), 'months': data.get('months'),
+                          'started': int(time.time()), 'status': 'created', 'note': ''})
+    return data
 
 
 def claim():
     """After a checkout: is it paid? Stores the key and token when it is."""
     st = load_state()
     co = st.get('checkout') or {}
+    info = _server_info()
+    if co.get('order_id'):
+        data = _call('POST', '/api/v1/claim', {'order_id': co['order_id'], 'server_id': info['server_id'],
+                                               'server_secret': info['server_secret']})
+        status = data.get('order_status') or ''
+        if not data.get('paid'):
+            if status in ('failed', 'cancelled', 'refunded') or status != co.get('status') or data.get('note') != co.get('note'):
+                _save_state(checkout=dict(co, status=status, note=data.get('note') or ''))
+            return {'paid': False, 'pending': status in ('created', 'pending'), 'status': status,
+                    'note': data.get('note') or ''}
+        if data.get('bound') and data.get('token'):
+            _store_token(data, data.get('key'))
+            _save_state(checkout=None)
+            return {'paid': True, 'bound': True, 'kind': co.get('kind')}
+        _save_state(checkout=None)
+        return {'paid': True, 'bound': False, 'kind': co.get('kind')}
     if not co.get('intent_id'):
         return {'paid': False, 'pending': False}
-    info = _server_info()
     data = _call('POST', '/api/v1/claim', {'intent_id': co['intent_id'], 'server_id': info['server_id'],
                                            'server_secret': info['server_secret']})
     if not data.get('paid'):
@@ -279,6 +331,21 @@ def claim():
 
 def cancel_checkout():
     _save_state(checkout=None)
+
+
+def link(force=False):
+    """Ask the licence server for the licence linked to this server's IP address (bought for this
+    server from another panel or the licence account). Returns the token payload, or None.
+    Without force it asks at most once every 5 minutes."""
+    st = load_state()
+    now = int(time.time())
+    if not force and now - int(st.get('last_link') or 0) < 300:
+        return None
+    _save_state(last_link=now)
+    data = _call('POST', '/api/v1/link', dict(_server_info()))
+    if not data.get('found'):
+        return None
+    return _store_token(data, data.get('key'))
 
 
 def activate(key, move=False):
@@ -299,6 +366,8 @@ def check():
         _save_state(last_error=str(e), last_error_at=int(time.time()))
         if e.code in ('not_found', 'bound_elsewhere', 'identity', 'not_bound'):
             # the licence server says this server no longer holds the licence: drop the token
+            # ('wrong_ip' keeps it: it runs out within 3 days by itself, so a short change of the
+            # outgoing address does not lock the module at once)
             _save_state(token=None)
         raise
     return _store_token(data)
@@ -307,6 +376,15 @@ def check():
 def refresh_if_due():
     """Called every few minutes by the backups timer; only talks to the server when due."""
     st = load_state()
+    if not st.get('key') or not st.get('token'):
+        # no licence here (or the licence server took it back): a licence linked to this server's
+        # IP activates by itself; asked every 6 hours
+        if time.time() - int(st.get('last_link') or 0) >= 6 * 3600:
+            try:
+                if link(force=True):
+                    return 'linked'
+            except LicenceError:
+                pass
     if not st.get('key'):
         return 'no licence'
     cur = current()
@@ -362,6 +440,7 @@ def download_module(dest_dir, version=None):
     if not re.fullmatch(r'/api/v1/module/download/[A-Za-z0-9_.\-]+', dl_path):
         raise LicenceError('The licence server sent an invalid download address.', 'bad_answer', 502)
     url = trust()['server'] + dl_path
+    _ipv4_first()
     path = os.path.join(dest_dir, f'hosting-{meta["version"]}.tar.gz')
     h = hashlib.sha256()
     try:

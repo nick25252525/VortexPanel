@@ -9177,11 +9177,12 @@
       </div>
 
 <!-- USERS & API KEYS -->
-      <!-- HOSTING MODULE (licence, buying, installing) -->
+      <!-- HOSTING MODULE (licence, buying with PayPal, installing) -->
       <div x-show="page==='hosting-module'" x-data="hostingModulePage()">
         <div class="page-header">
           <div><div class="page-title">Hosting Module</div><div class="page-sub">Shared hosting for VortexPanel: customer accounts with packages and limits and their own portal</div></div>
-          <div style="display:flex;gap:8px" x-show="st && lic().has_key">
+          <div style="display:flex;gap:8px;flex-wrap:wrap" x-show="st">
+            <a class="btn btn-ghost btn-sm" x-show="lic().has_key || lic().licensed" :href="accountUrl()" target="_blank" rel="noopener">Your licence account</a>
             <button class="btn btn-ghost btn-sm" :disabled="!!checking" @click="checkNow()" x-text="checking?'Checking...':'Check licence now'"></button>
           </div>
         </div>
@@ -9189,27 +9190,29 @@
         <div x-show="err" class="card-sm" style="color:var(--red);font-size:12px" x-text="err"></div>
 
         <template x-if="st">
-        <div style="max-width:980px">
+        <div style="max-width:1080px">
 
           <!-- licence status -->
           <template x-if="lic().has_key || lic().licensed">
             <div class="bp-head" :class="lic().licensed?'':'warn'">
               <div class="bp-ic" :class="lic().licensed?'':'warn'" x-html="vpIcon('shield')"></div>
               <div style="flex:1;min-width:240px">
-                <div style="font-size:15px;font-weight:700;color:var(--text-primary)" x-text="lic().licensed ? 'Licence active' : 'Licence not active'"></div>
+                <div style="font-size:15px;font-weight:700;color:var(--text-primary)" x-text="lic().licensed ? 'Licence active on this server' : 'Licence not active'"></div>
                 <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
                   <span x-text="lic().status_text"></span>
-                  <span x-show="lic().kind"> &middot; <span x-text="(lic().kind==='dedicated'?'Dedicated server':'VPS')+' licence, '+lic().period"></span></span>
-                  <span x-show="lic().period_end"> &middot; <span x-text="(['active','past_due'].includes(lic().status)?'renews ':'paid until ')+fmtDate(lic().period_end)"></span></span>
-                  <span x-show="lic().key_last4"> &middot; key ...<span x-text="lic().key_last4"></span></span>
+                  <span x-show="lic().linked_ip"> &middot; linked to <span style="font-family:var(--font-mono)" x-text="lic().linked_ip"></span></span>
+                  <span x-show="lic().months"> &middot; <span x-text="lic().months+(lic().months===1?' month':' months')"></span></span>
+                  <span x-show="!lic().linked_ip && lic().kind && lic().kind!=='standard'"> &middot; <span x-text="(lic().kind==='dedicated'?'Dedicated server':'VPS')+' licence, '+lic().period"></span></span>
+                  <span x-show="lic().period_end && !/^Ended/.test(lic().status_text||'')"> &middot; <span x-text="endText()"></span></span>
+                  <span x-show="lic().key_last4 && !lic().linked_ip"> &middot; key ...<span x-text="lic().key_last4"></span></span>
                 </div>
                 <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px">
                   <span x-show="lic().last_ok" x-text="'Last check-in '+fmtTime(lic().last_ok)"></span>
                   <span x-show="lic().email" x-text="' - billing email '+lic().email"></span>
                 </div>
               </div>
-              <a class="btn btn-ghost btn-sm" :href="accountUrl()" target="_blank" rel="noopener">Billing and invoices</a>
-              <button class="btn btn-ghost btn-sm" x-show="lic().has_key" @click="deactivate()">Move to another server</button>
+              <a class="btn btn-ghost btn-sm" :href="accountUrl()" target="_blank" rel="noopener" x-text="lic().linked_ip ? 'Change IP or renew' : 'Billing and invoices'"></a>
+              <button class="btn btn-ghost btn-sm" x-show="lic().has_key && !lic().linked_ip" @click="deactivate()">Move to another server</button>
             </div>
           </template>
           <div x-show="lic().last_error && lic().has_key" class="card-sm bp-card" style="font-size:12px;border-color:rgba(245,158,11,.35)">
@@ -9217,7 +9220,7 @@
             <span class="bp-note" x-show="lic().licensed" x-text="' The licence keeps working until '+fmtTime(lic().valid_until)+' without a check-in.'"></span>
           </div>
           <div x-show="lic().has_key && !lic().licensed && st.installed_version" class="card-sm bp-card" style="font-size:12px;color:var(--text-secondary)">
-            The Hosting Module is locked: new accounts and package changes are not possible. Customer websites, mail and the customer portal keep running. Renew in <a :href="accountUrl()" target="_blank" rel="noopener" style="color:var(--accent)">your licence account</a>, then press Check licence now.
+            The Hosting Module is locked: new accounts and package changes are not possible. Customer websites, mail and the customer portal keep running. <span x-text="canRenew() ? 'Renew below to unlock it.' : 'Renew in your licence account, then press Check licence now.'"></span>
           </div>
           <div x-show="claimMsg" class="card-sm bp-card" style="font-size:12px" x-text="claimMsg"></div>
 
@@ -9242,119 +9245,157 @@
             </div>
           </template>
 
-          <!-- renewal problems on an existing licence -->
+          <!-- older subscription licences: payment problems -->
           <div x-show="lic().has_key && ['on_hold','past_due','offline_expired'].includes(lic().status)" class="card-sm bp-card" style="font-size:12px">
             <span x-show="lic().status==='on_hold'">The renewal payment failed. Update the payment method in <a :href="accountUrl()" target="_blank" rel="noopener" style="color:var(--accent)">Billing and invoices</a>; the licence becomes active again as soon as the payment goes through.</span>
-            <span x-show="lic().status==='past_due'">The last renewal payment is late. The licence keeps working while Dodo Payments retries; you can update the payment method in <a :href="accountUrl()" target="_blank" rel="noopener" style="color:var(--accent)">Billing and invoices</a>.</span>
+            <span x-show="lic().status==='past_due'">The last renewal payment is late. The licence keeps working while the payment is retried; you can update the payment method in <a :href="accountUrl()" target="_blank" rel="noopener" style="color:var(--accent)">Billing and invoices</a>.</span>
             <span x-show="lic().status==='offline_expired'">This server could not reach the licence server for too long. Check the server's internet connection, then press Check licence now.</span>
           </div>
 
+          <!-- renew this server's licence (prepaid: ends soon or ended) -->
+          <template x-if="canRenew() && !pending() && !tracking && !failedOrder()">
+            <div class="card bp-card hm-renew">
+              <div>
+                <div class="card-title" x-text="lic().licensed ? 'Renew this server\'s licence' : 'Renew to unlock the Hosting Module'"></div>
+                <div class="card-sub" x-text="'The time is added to the current end date, so renewing early loses nothing. Licences do not renew by themselves.'"></div>
+              </div>
+              <div class="hm-periods" role="radiogroup" aria-label="Renewal length">
+                <template x-for="p in periods()" :key="p.months">
+                  <button type="button" role="radio" class="hm-period" :class="renewMonths===p.months?'on':''" :aria-checked="renewMonths===p.months?'true':'false'" @click="renewMonths=p.months">
+                    <span class="hm-period-l" x-text="p.label"></span>
+                    <span class="hm-period-p" x-text="money(+p.price)"></span>
+                    <span class="hm-period-s" x-text="money(p.price/p.months)+' a month'"></span>
+                  </button>
+                </template>
+              </div>
+              <div class="hm-renew-ft">
+                <span class="hm-hint" style="margin:0" x-text="'New end date: '+fmtDate(renewEnd())"></span>
+                <button type="button" class="hm-paypal" :disabled="!!buying" @click="buy('renew')" x-text="buying ? 'Opening PayPal...' : 'Renew '+money(periodPrice(renewMonths))+' with PayPal'"></button>
+              </div>
+            </div>
+          </template>
+
+          <!-- a payment that did not go through -->
+          <div x-show="failedOrder()" class="card-sm bp-card hm-failed" role="alert">
+            <b class="bp-bad" x-text="lic().checkout?.status==='cancelled' ? 'The PayPal order was cancelled.' : 'The payment did not go through.'"></b>
+            <span x-text="(lic().checkout?.note ? lic().checkout.note+'. ' : '')+'Nothing was charged for a licence.'"></span>
+            <button type="button" class="btn btn-ghost btn-sm" @click="cancelCheckout()">Start again</button>
+          </div>
+
           <!-- order: configure on the left, summary or progress on the right -->
-          <template x-if="(!lic().licensed || tracking) && !(lic().has_key && ['on_hold','offline_expired'].includes(lic().status))">
+          <template x-if="showOrder()">
             <div class="hm-order" :class="(pending() || tracking) ? 'busy' : ''">
               <div class="hm-order-main">
-                <h2 class="hm-lead" x-text="(pending() || tracking) ? 'Setting up the Hosting Module on this server.' : 'Turn this server into a hosting business.'">Turn this server into a hosting business.</h2>
-                <p class="hm-sub">Create customer accounts with their own limits and their own control panel. Your websites keep running exactly as they are.</p>
+                <h2 class="hm-lead" x-text="(pending() || tracking) ? (orderKind()==='renew' ? 'Renewing this server\'s licence.' : 'Setting up the Hosting Module on this server.') : 'Turn this server into a hosting business.'">Turn this server into a hosting business.</h2>
+                <p class="hm-sub" x-text="(pending() || tracking) ? 'Finish the payment in the PayPal window. This page notices the payment by itself, links the licence to this server and installs the module. You can leave this page; it carries on.' : 'Create customer accounts with their own limits and their own control panel. Your websites keep running exactly as they are.'"></p>
 
-                <div class="hm-build" x-show="st.selling && !pending() && !tracking">
-                  <p class="hm-sentence">
-                    I need
-                    <label class="hm-pick"><span class="sr-only">Number of servers</span><span class="hm-pick-v" aria-hidden="true" x-text="buySeats===1?'one server':buySeats+' servers'"></span>
-                      <select x-model.number="buySeats" @change="syncPlan()">
-                        <template x-for="n in seatChoices()" :key="n"><option :value="n" :selected="n===buySeats" x-text="n===1?'one server':n+' servers'"></option></template>
-                      </select></label>
-                    on
-                    <span class="hm-nb"><label class="hm-pick"><span class="sr-only">Server type</span><span class="hm-pick-v" aria-hidden="true" x-text="buyKind==='dedicated'?'dedicated hardware':'a VPS'"></span>
-                      <select x-model="buyKind" @change="syncPlan()">
-                        <template x-for="k in kindsOnSale()" :key="k"><option :value="k" :selected="k===buyKind" x-text="k==='dedicated'?'dedicated hardware':'a VPS'"></option></template>
-                      </select></label>,</span>
-                    paid
-                    <span class="hm-nb"><label class="hm-pick"><span class="sr-only">Billing</span><span class="hm-pick-v" aria-hidden="true" x-text="buyPeriod==='yearly'?'once a year':'every month'"></span>
-                      <select x-model="buyPeriod" @change="syncPlan()">
-                        <template x-for="p in periodChoices()" :key="p"><option :value="p" :selected="p===buyPeriod" x-text="p==='yearly'?'once a year':'every month'"></option></template>
-                      </select></label>.</span>
-                  </p>
-                  <p class="hm-math" x-show="planObj()">
-                    <span x-text="money(perServerMonth())"></span> per server each month<span x-show="savingsText()" x-text="', '+savingsText()"></span>.
-                  </p>
-                  <p class="hm-hint" x-show="st?.virt==='none' && buyKind==='vps'">This server runs on its own hardware, so it needs the dedicated hardware licence.</p>
-                  <p class="hm-hint" x-show="buySeats>1">This server uses the first licence. The other keys arrive by email for your other servers.</p>
+                <div class="hm-build" x-show="available() && !pending() && !tracking && sideMode==='buy'">
+                  <div class="hm-step-t">1. Billing period</div>
+                  <div class="hm-periods" role="radiogroup" aria-label="Billing period">
+                    <template x-for="p in periods()" :key="p.months">
+                      <button type="button" role="radio" class="hm-period" :class="buyMonths===p.months?'on':''" :aria-checked="buyMonths===p.months?'true':'false'" @click="buyMonths=p.months">
+                        <span class="hm-period-l" x-text="p.label"></span>
+                        <span class="hm-period-p" x-text="money(+p.price)"></span>
+                        <span class="hm-period-s" x-text="'per licence · '+money(p.price/p.months)+' a month'"></span>
+                      </button>
+                    </template>
+                  </div>
+
+                  <div class="hm-step-t">2. How many servers</div>
+                  <div class="hm-qty-row">
+                    <div class="hm-stepper">
+                      <button type="button" aria-label="One licence fewer" :disabled="buyQty<=1" @click="setQty(buyQty-1)">-</button>
+                      <input type="number" inputmode="numeric" aria-label="Number of licences" :min="1" :max="maxQty()" x-model.number="buyQty" @change="setQty(buyQty)">
+                      <button type="button" aria-label="One licence more" :disabled="buyQty>=maxQty()" @click="setQty(buyQty+1)">+</button>
+                    </div>
+                    <span class="hm-hint" style="margin:0">One licence per server. Each licence is linked to one server IP.</span>
+                  </div>
+
+                  <div class="hm-step-t">3. Server IPs</div>
+                  <div class="hm-ips">
+                    <div class="hm-ip-row"><span class="hm-ip-n">1</span><span class="hm-ip-v" x-text="offer().your_ip || 'This server'"></span><span class="hm-tag">This server</span></div>
+                    <template x-for="i in ipRowCount()" :key="i">
+                      <div class="hm-ip-row"><span class="hm-ip-n" x-text="i+1"></span>
+                        <label class="sr-only" :for="'hm-ip-'+i" x-text="'IP of server '+(i+1)"></label>
+                        <input :id="'hm-ip-'+i" class="form-input hm-ip-in" x-model.trim="buyIps[i-1]" placeholder="IP of another server, or leave empty" autocomplete="off" spellcheck="false">
+                      </div>
+                    </template>
+                    <div class="hm-ip-row hm-ip-more" x-show="buyQty-1-ipRowCount()>0" x-text="'and '+(buyQty-1-ipRowCount())+' more, to link later in your licence account'"></div>
+                    <div class="hm-ip-note">Empty ones can be linked later in your licence account. On a linked server, open Hosting Module and it activates by itself, no key to copy.</div>
+                  </div>
                 </div>
-                <p class="hm-hint" x-show="!st.selling && !st.plans_error">Licences are not on sale yet. If you already have a key, enter it on the right.</p>
+                <p class="hm-hint" x-show="!available() && !st.plans_error && !pending() && !tracking">Licences are not on sale right now. If you already have a licence key, enter it on the right.</p>
                 <p class="hm-hint bp-bad" x-show="st.plans_error" x-text="st.plans_error"></p>
 
                 <ul class="hm-gets" x-show="!pending() && !tracking">
                   <template x-for="(f, i) in (st?.features||[])" :key="f">
                     <li><span class="hm-gets-ic" x-html="vpIcon(['users','monitor','cpu','server','shield','globe'][i % 6])"></span><span x-text="f"></span></li>
                   </template>
-                  <li><span class="hm-gets-ic" x-html="vpIcon('shuffle')"></span><span>Move the licence to a new server yourself, once a month</span></li>
+                  <li><span class="hm-gets-ic" x-html="vpIcon('shuffle')"></span><span x-text="'Move a licence to a new server IP once every '+(offer().transfer_days||30)+' days'"></span></li>
                   <li><span class="hm-gets-ic" x-html="vpIcon('heart')"></span><span>License Holder badge and priority answers on the VortexPanel forum</span></li>
                 </ul>
               </div>
 
               <aside class="hm-order-side">
-                <!-- progress after the payment page was opened (a real sequence) -->
+                <!-- progress after PayPal was opened -->
                 <div class="hm-track" x-show="pending() || tracking">
                   <div class="hm-side-t">Your order</div>
+                  <dl class="hm-lines" x-show="lic().checkout?.total">
+                    <div><dt x-text="(lic().checkout?.quantity||1)+' x '+(lic().checkout?.months||'')+((lic().checkout?.months===1)?' month':' months')"></dt><dd x-text="money(+(lic().checkout?.total||0))"></dd></div>
+                  </dl>
                   <ol class="hm-steps">
                     <template x-for="(s, i) in trackSteps()" :key="i">
                       <li :class="s.state"><span class="hm-step-dot"></span><div><b x-text="s.title"></b><span x-text="s.note"></span></div></li>
                     </template>
                   </ol>
                   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
-                    <a class="btn btn-ghost btn-sm" x-show="pending() && lastCheckoutUrl" :href="lastCheckoutUrl" target="_blank" rel="noopener">Open the payment page again</a>
-                    <button class="btn btn-ghost btn-sm" x-show="pending()" @click="cancelCheckout()">Cancel order</button>
-                    <button class="btn btn-primary btn-sm" x-show="tracking && st.installed_version && !installBusy()" @click="openAccounts()">Open Hosting Accounts</button>
+                    <a class="btn btn-ghost btn-sm" x-show="pending() && approveUrl()" :href="approveUrl()" target="_blank" rel="noopener">Open PayPal again</a>
+                    <button class="btn btn-ghost btn-sm" x-show="pending() && lic().checkout?.status!=='pending'" @click="cancelCheckout()">Cancel order</button>
+                    <button class="btn btn-primary btn-sm" x-show="tracking && st.installed_version && !installBusy() && lic().licensed" @click="openAccounts()">Open Hosting Accounts</button>
                   </div>
+                  <p class="hm-fine" x-show="pending()">No PayPal window? Your browser may have blocked it: use Open PayPal again.</p>
                 </div>
 
                 <!-- summary -->
-                <div class="hm-sum" x-show="!pending() && !tracking && sideMode==='buy' && st.selling">
+                <div class="hm-sum" x-show="!pending() && !tracking && sideMode==='buy' && available()">
                   <div class="hm-side-t">Summary</div>
-                  <dl class="hm-lines" x-show="planObj()">
-                    <div><dt x-text="(planObj()?.kind==='dedicated'?'Dedicated hardware':'VPS')+' licence'+(buySeats>1?' x '+buySeats:'')"></dt><dd x-text="money(listPrice())"></dd></div>
-                    <div x-show="packSaving()>0.004" class="save"><dt x-text="buySeats+'-server pack'"></dt><dd x-text="'- '+money(packSaving())"></dd></div>
-                    <div x-show="planObj()?.compare_at && buySeats===1" class="save"><dt>Introductory price</dt><dd x-text="'- '+money((planObj()?.compare_at||0)-(planObj()?.amount||0))"></dd></div>
-                    <div class="total"><dt x-text="buyPeriod==='yearly'?'Due today, then yearly':'Due today, then monthly'"></dt><dd x-text="money(planObj()?.amount||0)"></dd></div>
+                  <dl class="hm-lines">
+                    <div><dt x-text="(buyQty===1?'1 licence':buyQty+' licences')+' x '+(period(buyMonths)?.label||'')"></dt><dd x-text="money(total())"></dd></div>
+                    <div><dt>Paid until</dt><dd x-text="fmtDate(addMonths(new Date(), buyMonths).getTime()/1000)"></dd></div>
+                    <div class="total"><dt>Due today</dt><dd x-text="money(total())"></dd></div>
                   </dl>
-                  <p class="hm-fine">Tax is added on the payment page if it applies to you.</p>
                   <label class="form-label" for="hm-email">Send the licence and invoices to</label>
                   <input id="hm-email" class="form-input" type="email" x-model="email" placeholder="you@example.com" autocomplete="email">
-                  <p class="hm-fine">Sign up on the forum with this email to get the License Holder badge.</p>
-                  <button type="button" class="hm-link" x-show="!showCoupon" @click="showCoupon=true; $nextTick(() => $refs.coupon && $refs.coupon.focus())">Add a discount code</button>
-                  <div x-show="showCoupon" style="margin-top:8px">
-                    <label class="form-label" for="hm-coupon">Discount code</label>
-                    <input id="hm-coupon" x-ref="coupon" class="form-input" x-model="coupon" maxlength="64" placeholder="Applied on the payment page">
-                  </div>
-                  <button class="btn btn-primary hm-pay" :disabled="!!(buying || !buyPlan || !validEmail())" @click="buy()" x-text="buying?'Opening the payment page...':'Continue to payment'"></button>
-                  <p class="hm-fine">Card and other methods on Dodo Payments' secure page. Come back to this tab when you're done.</p>
+                  <p class="hm-fine">Your licence account is made for this email. We send a link to choose its password.</p>
+                  <button type="button" class="hm-paypal hm-pay" :disabled="!!(buying || !validEmail() || !period(buyMonths))" @click="buy('new')" x-text="buying ? 'Opening PayPal...' : 'Pay '+money(total())+' with PayPal'"></button>
+                  <p class="hm-fine" style="text-align:center">PayPal opens in a new window: pay with PayPal or a card. Then come back to this tab. Licences are paid in advance and do not renew by themselves.</p>
                 </div>
 
-                <!-- existing key -->
-                <div class="hm-sum" x-show="!pending() && !tracking && (sideMode==='key' || !st.selling)">
+                <!-- an older licence key -->
+                <div class="hm-sum" x-show="!pending() && !tracking && (sideMode==='key' || !available())">
                   <div class="hm-side-t">Activate a licence key</div>
-                  <p class="hm-fine" style="margin-top:0">For a key from a pack, a licence moved from another server, or one your provider gave you.</p>
+                  <p class="hm-fine" style="margin-top:0">For a key you were given (a key from a pack or a provider). Licences bought with PayPal need no key: they are linked to the server's IP.</p>
                   <input class="form-input" style="font-family:var(--font-mono)" x-model="keyInput" placeholder="VPHM-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX" @keydown.enter="activate()" aria-label="Licence key">
                   <label class="form-check" x-show="actCode==='bound_elsewhere' || move" style="margin-top:8px"><input type="checkbox" x-model="move"><span>Move it from the other server to this one. The other server's Hosting Module locks its admin side.</span></label>
                   <div x-show="actErr" class="hm-fine bp-bad" x-text="actErr"></div>
                   <button class="btn btn-primary hm-pay" :disabled="!!(activating || keyInput.trim().length<10)" @click="activate()" x-text="activating?'Activating...':'Activate on this server'"></button>
                 </div>
 
-                <button type="button" class="hm-link hm-switch" x-show="!pending() && !tracking && st.selling" @click="sideMode = sideMode==='buy' ? 'key' : 'buy'"
-                        x-text="sideMode==='buy' ? 'I already have a licence key' : 'Buy a new licence instead'"></button>
+                <button type="button" class="hm-link hm-switch" x-show="!pending() && !tracking && available()" @click="sideMode = sideMode==='buy' ? 'key' : 'buy'"
+                        x-text="sideMode==='buy' ? 'I have a licence key' : 'Buy a licence instead'"></button>
 
                 <div class="hm-help">
                   <div x-show="st?.refund_days"><b x-text="'Refund within '+st.refund_days+' days'"></b>
                     <span>No questions asked. Write to <a :href="'mailto:'+(st.refund_email||'refund@vortexpanel.dev')" x-text="st.refund_email||'refund@vortexpanel.dev'"></a> from the billing email.</span></div>
                   <div><b>Questions before you buy?</b>
-                    <span><a :href="'mailto:'+(st.support_email||'support@vortexpanel.dev')" x-text="st.support_email||'support@vortexpanel.dev'"></a></span></div>
+                    <span><a href="https://vortexpanel.dev/forum/" target="_blank" rel="noopener">Ask on the forum</a> or <a :href="'mailto:'+(st.support_email||'support@vortexpanel.dev')" x-text="st.support_email||'support@vortexpanel.dev'"></a></span></div>
                   <div class="hm-legal"><template x-for="(label,k) in {terms_url:'Terms',refund_url:'Refund policy',privacy_url:'Privacy'}" :key="k"><a x-show="st?.links?.[k]" :href="st.links[k]" target="_blank" rel="noopener" x-text="label"></a></template></div>
                 </div>
               </aside>
             </div>
           </template>
 
-          <div class="bp-note" style="margin-top:6px">This server: <span style="font-family:var(--font-mono)" x-text="st.server_id"></span></div>
+          <div class="bp-note" style="margin-top:6px">This server: <span style="font-family:var(--font-mono)" x-text="(offer().your_ip ? offer().your_ip+' - ' : '')+st.server_id"></span></div>
         </div>
         </template>
       </div>

@@ -8562,9 +8562,8 @@ function pythonProjectsPage() {
 function hostingModulePage() {
   return {
     st: null, loading: false, err: '',
-    email: '', plan: '', buying: false, keyInput: '', move: false, activating: false, actErr: '', actCode: '',
-    sideMode: 'buy', showCoupon: false, tracking: false, lastCheckoutUrl: '',
-    buyKind: 'vps', buyPeriod: 'yearly', buySeats: 1, buyPlan: '', coupon: '',
+    email: '', buying: false, keyInput: '', move: false, activating: false, actErr: '', actCode: '',
+    sideMode: 'buy', tracking: false, lastKind: '', buyMonths: 12, buyQty: 1, buyIps: [], renewMonths: 12,
     checking: false, pollTimer: null, claimMsg: '',
     async init() {
       if (!vpOnce(this, 'init')) return;
@@ -8583,14 +8582,66 @@ function hostingModulePage() {
         this.err = (r && r.error) || 'Could not load the licence status'; return;
       }
       this.err = ''; this.st = r;
-      if (r.installed_version && r.plugin_status === 'loaded' && !(r.install_running || r.install?.state === 'running')) this.ensureModulePages();
-      if (this.tracking && r.licence?.licensed && r.installed_version && !(r.install_running || r.install?.state === 'running') && r.install?.state !== 'failed') {
-        this.tracking = false; toast('The Hosting Module is ready. Open Hosting Accounts to add your first customer.', 'success');
+      if (r.linked_now) {
+        this.tracking = !r.installed_version;
+        toast('The licence linked to this server\'s IP is active' + (r.installed_version ? '.' : '. Installing the Hosting Module...'), 'success');
       }
-      if (!this.buyPlan && r.plans && r.plans.length) this.pickDefault();
+      if (r.installed_version && r.plugin_status === 'loaded' && !this.installBusy()) this.ensureModulePages();
+      if (this.tracking && r.licence?.licensed && !this.pending() && !this.installBusy()
+          && (r.installed_version || this.orderKind() === 'renew') && r.install?.state !== 'failed') {
+        this.tracking = false;
+        toast(this.orderKind() === 'renew' ? 'Licence renewed: ' + this.endText() + '.' : 'The Hosting Module is ready. Open Hosting Accounts to add your first customer.', 'success');
+        this.lastKind = '';
+      }
+      const ps = this.periods();
+      if (ps.length && !ps.some(p => p.months === this.buyMonths)) this.buyMonths = ps[ps.length - 1].months;
+      if (ps.length && !ps.some(p => p.months === this.renewMonths)) this.renewMonths = ps[ps.length - 1].months;
+      if (!this.available()) this.sideMode = 'key';
       this.schedule();
     },
     lic() { return this.st?.licence || {}; },
+    offer() { return this.st?.offer || {}; },
+    periods() { return (this.offer().periods || []).map(p => ({months: +p.months, label: p.label, price: +p.price})); },
+    period(m) { return this.periods().find(p => p.months === m); },
+    periodPrice(m) { return (this.period(m) || {}).price || 0; },
+    available() { return !!this.offer().available && this.periods().length > 0; },
+    maxQty() { return Math.max(1, +this.offer().max_quantity || 50); },
+    setQty(n) { n = parseInt(n, 10); this.buyQty = Math.min(this.maxQty(), Math.max(1, isNaN(n) ? 1 : n)); },
+    ipRowCount() { return Math.max(0, Math.min(this.buyQty - 1, 9)); },
+    total() { return Math.round(this.periodPrice(this.buyMonths) * 100) * this.buyQty / 100; },
+    addMonths(d, n) {
+      const x = new Date(d.getTime()), day = x.getDate();
+      x.setDate(1); x.setMonth(x.getMonth() + n);
+      x.setDate(Math.min(day, new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate()));
+      return x;
+    },
+    renewEnd() {
+      const end = (this.lic().period_end || 0) * 1000;
+      const base = end > Date.now() ? new Date(end) : new Date();
+      return this.addMonths(base, this.renewMonths).getTime() / 1000;
+    },
+    endText() {
+      const t = this.lic().period_end; if (!t) return '';
+      if (t * 1000 < Date.now()) return 'ended ' + this.fmtDate(t);
+      if (this.lic().source === 'dodo' && ['active', 'past_due'].includes(this.lic().status)) return 'renews ' + this.fmtDate(t);
+      return 'paid until ' + this.fmtDate(t);
+    },
+    daysLeft() { const t = this.lic().period_end; return t ? (t * 1000 - Date.now()) / 86400000 : Infinity; },
+    // prepaid (PayPal) and manual licences of this server are renewed here: shown 30 days before the end
+    canRenew() {
+      const l = this.lic();
+      return this.available() && !!l.has_key && ['paypal', 'manual'].includes(l.source) && !!l.period_end
+        && !['revoked', 'refunded', 'other_server', 'invalid'].includes(l.status) && this.daysLeft() <= 30;
+    },
+    showOrder() {
+      if (this.pending() || this.tracking) return true;
+      if (this.failedOrder() || this.lic().licensed || this.canRenew()) return false;
+      return !(this.lic().has_key && ['on_hold', 'offline_expired', 'past_due'].includes(this.lic().status));
+    },
+    orderKind() { return this.lic().checkout?.kind || this.lastKind || 'new'; },
+    approveUrl() { return this.lic().checkout?.approve_url || ''; },
+    failedOrder() { return ['failed', 'cancelled', 'refunded'].includes(this.lic().checkout?.status); },
+    pending() { return !!this.lic().checkout && !this.failedOrder(); },
     rootApp() { const el = document.querySelector('[x-data="rootApp()"]'); return el ? Alpine.$data(el) : null; },
     // the module's pages are added to the menu when the panel loads; after an install in this
     // browser session they are loaded here, so the menu entry appears without a page reload
@@ -8604,34 +8655,41 @@ function hostingModulePage() {
       if (root && root.pluginPages.some(p => p.id === 'hosting-accounts')) { this.tracking = false; root.go('hosting-accounts'); }
       else toast('The Hosting Module is installed but its page did not load. Reload the panel (Ctrl+F5); if it stays missing, check Settings > Plugins.', 'error');
     },
-    pending() { return !!this.lic().checkout && !this.lic().licensed; },
     schedule() {
       clearTimeout(this.pollTimer);
       if (!this.st) return;
-      if (this.pending()) this.pollTimer = setTimeout(() => this.claim(), 5000);
-      else if (this.st.install_running || this.st.install?.state === 'running') this.pollTimer = setTimeout(() => this.load(), 3000);
+      if (this.pending()) this.pollTimer = setTimeout(() => this.claim(), 6000);
+      else if (this.installBusy()) this.pollTimer = setTimeout(() => this.load(), 3000);
     },
-    async buy() {
+    async buy(kind) {
       if (this.buying) return;
-      this.buying = true; this.err = '';
-      const w = window.open('', '_blank');
-      const r = await post('/api/licence/checkout', {plan: this.buyPlan, email: this.email.trim(), coupon: this.coupon.trim()});
+      this.buying = true; this.claimMsg = '';
+      const w = window.open('', '_blank');   // opened now, while the click still counts, so it is not blocked
+      const body = kind === 'renew'
+        ? {kind: 'renew', months: this.renewMonths}
+        : {kind: 'new', months: this.buyMonths, quantity: this.buyQty, email: this.email.trim(),
+           ips: this.buyIps.slice(0, this.ipRowCount()).map(x => (x || '').trim())};
+      const r = await post('/api/licence/order', body).catch(() => null);
       this.buying = false;
-      if (!r.ok) { if (w) w.close(); toast(r.error || 'Could not start the checkout', 'error'); return; }
-      this.lastCheckoutUrl = r.checkout_url; this.tracking = true;
-      if (w) w.location = r.checkout_url; else window.location.href = r.checkout_url;
+      if (!r || !r.ok) { if (w) w.close(); toast((r && r.error) || 'Could not open PayPal. Try again.', 'error'); return; }
+      this.tracking = true; this.lastKind = kind;
+      if (w) w.location = r.approve_url; else window.open(r.approve_url, '_blank');
       await this.load();
     },
     async claim() {
       const r = await post('/api/licence/claim', {}).catch(() => null);
       if (r && r.ok && r.paid) {
-        if (r.bound) toast('Payment confirmed. The licence is active' + (r.install_started ? ' and the Hosting Module is being installed.' : '.'), 'success');
-        else { this.tracking = false; this.claimMsg = 'Payment confirmed. This server already has a licence, so the new key was kept: ' + r.key; }
+        if (r.bound) toast(r.kind === 'renew' ? 'Payment received. The licence is renewed.' : 'Payment received. The licence is active' + (r.install_started ? ' and the Hosting Module is being installed.' : '.'), 'success');
+        else { this.tracking = false; this.claimMsg = r.key ? 'Payment confirmed. This server already has a licence, so the new key was kept: ' + r.key : 'Payment received. The licences are in your licence account; this server already had one.'; }
         await this.load(); return;
+      }
+      if (r && r.ok && ['failed', 'cancelled', 'refunded'].includes(r.status)) { this.tracking = false; await this.load(); return; }
+      if (r && r.ok && this.st?.licence?.checkout && (r.status !== this.st.licence.checkout.status || (r.note || '') !== (this.st.licence.checkout.note || ''))) {
+        this.st.licence.checkout = Object.assign({}, this.st.licence.checkout, {status: r.status || '', note: r.note || ''});
       }
       this.schedule();
     },
-    async cancelCheckout() { await post('/api/licence/checkout/cancel', {}); this.tracking = false; this.lastCheckoutUrl = ''; await this.load(); },
+    async cancelCheckout() { await post('/api/licence/checkout/cancel', {}); this.tracking = false; this.lastKind = ''; await this.load(); },
     async activate() {
       if (this.activating) return;
       this.activating = true; this.actErr = ''; this.actCode = '';
@@ -8646,7 +8704,8 @@ function hostingModulePage() {
       this.checking = true;
       const r = await post('/api/licence/check', {});
       this.checking = false;
-      if (!r.ok) toast(r.error || 'Check failed', 'error'); else { this.st = r; toast('Licence checked', 'success'); }
+      if (!r.ok) toast(r.error || 'Check failed', 'error');
+      else { this.st = r; toast(r.install_started ? 'Licence active. Installing the Hosting Module...' : 'Licence checked', 'success'); if (r.install_started) this.tracking = true; }
       this.schedule();
     },
     async install() {
@@ -8662,69 +8721,35 @@ function hostingModulePage() {
       toast('The licence is free. Activate it on the new server.', 'success');
       await this.load();
     },
-    plansList() { return this.st?.plans || []; },
-    kindsOnSale() { return ['vps', 'dedicated'].filter(k => this.plansList().some(p => p.kind === k)); },
-    periodChoices() { return ['yearly', 'monthly'].filter(per => this.plansList().some(p => p.kind === this.buyKind && p.period === per)); },
-    seatChoices() {
-      const n = [...new Set(this.plansList().filter(p => p.kind === this.buyKind && p.period === this.buyPeriod).map(p => p.seats))];
-      return n.sort((a, b) => a - b);
-    },
-    findPlan(kind, period, seats) { return this.plansList().find(p => p.kind === kind && p.period === period && p.seats === seats); },
-    pickDefault() {
-      const kinds = this.kindsOnSale();
-      if (!kinds.length) return;
-      if (!kinds.includes(this.buyKind) || (this.st?.virt === 'none' && kinds.includes('dedicated') && !this.buyPlan)) {
-        this.buyKind = (this.st?.virt === 'none' && kinds.includes('dedicated')) ? 'dedicated' : kinds[0];
-      }
-      this.syncPlan();
-    },
-    syncPlan() {
-      const pers = this.periodChoices();
-      if (!pers.includes(this.buyPeriod)) this.buyPeriod = pers[0] || 'yearly';
-      const seats = this.seatChoices();
-      if (!seats.includes(this.buySeats)) this.buySeats = seats.includes(1) ? 1 : (seats[0] || 1);
-      this.buyPlan = (this.findPlan(this.buyKind, this.buyPeriod, this.buySeats) || {}).id || '';
-    },
     validEmail() { return /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(this.email.trim()); },
-    listPrice() {
-      const p = this.planObj(); if (!p) return 0;
-      const one = this.findPlan(p.kind, p.period, 1);
-      if (p.seats === 1) return p.compare_at || p.amount;
-      return one ? one.amount * p.seats : p.amount;
-    },
-    packSaving() { const p = this.planObj(); return p && p.seats > 1 ? Math.max(0, this.listPrice() - p.amount) : 0; },
-    perServerMonth() { const p = this.planObj(); return p ? p.amount / p.seats / (p.period === 'yearly' ? 12 : 1) : 0; },
-    savingsText() {
-      const p = this.planObj(); if (!p) return '';
-      const other = this.findPlan(p.kind, p.period === 'yearly' ? 'monthly' : 'yearly', p.seats);
-      if (!other) return '';
-      if (p.period === 'yearly') {
-        const diff = other.amount * 12 - p.amount;
-        return diff > 0.5 ? this.money(diff) + ' a year less than paying monthly' : '';
-      }
-      const diff = p.amount * 12 - other.amount;
-      return diff > 0.5 ? 'yearly billing would save ' + this.money(diff) : '';
-    },
     installBusy() { return !!(this.st?.install_running || this.st?.install?.state === 'running'); },
     trackSteps() {
-      const paid = !this.pending(), lic = !!this.lic().licensed, inst = this.st?.install || {};
+      const co = this.lic().checkout || {}, licd = !!this.lic().licensed, inst = this.st?.install || {};
+      const paid = !this.pending() && licd, held = co.status === 'pending';
       const busy = this.installBusy(), failed = inst.state === 'failed', done = !!this.st?.installed_version && !busy && !failed;
-      return [
-        {title: 'Payment page opened', note: 'Pay in the other tab.', state: 'done'},
-        {title: 'Payment confirmed', note: paid ? 'Thank you.' : 'This updates by itself, usually within a minute.', state: paid ? 'done' : 'now'},
-        {title: 'Licence active on this server', note: lic ? 'The key is also in your email.' : '', state: lic ? 'done' : (paid ? 'now' : 'next')},
-        {title: 'Hosting Module installed', note: failed ? (inst.message || 'The install failed; try again in the Module card.') : (busy ? 'Installing. The panel restarts once, this page reconnects.' : (done ? 'Ready to use.' : '')),
-         state: failed ? 'fail' : (done && lic ? 'done' : (lic ? 'now' : 'next'))},
+      const ip = this.lic().linked_ip || this.offer().your_ip || 'this server';
+      const steps = [
+        {title: 'PayPal window opened', note: co.started ? new Date(co.started * 1000).toLocaleTimeString() : '', state: 'done'},
+        {title: held ? 'PayPal is holding the payment' : (paid ? 'Payment received' : 'Waiting for the payment'),
+         note: held ? 'Some payments are checked by PayPal first; the licence follows as soon as PayPal releases it.' : (paid ? 'Thank you.' : (co.note || 'Checking every few seconds.')),
+         state: paid ? 'done' : 'now'},
       ];
+      if (this.orderKind() === 'renew' && !this.pending()) {
+        steps.push({title: 'Licence renewed', note: licd ? this.endText() : '', state: licd ? 'done' : 'now'});
+        return steps;
+      }
+      steps.push({title: 'Licence linked to ' + ip, note: licd ? 'Your licence account and the receipt are in your email.' : '', state: licd ? 'done' : (paid ? 'now' : 'next')});
+      steps.push({title: 'Hosting Module installed', note: failed ? (inst.message || 'The install failed; try again in the Module card.') : (busy ? 'Installing. The panel restarts once, this page reconnects.' : (done ? 'Ready to use.' : '')),
+                  state: failed ? 'fail' : (done && licd ? 'done' : (licd ? 'now' : 'next'))});
+      return steps;
     },
-    planObj() { return this.plansList().find(p => p.id === this.buyPlan); },
     money(v) {
-      const cur = this.st?.currency || 'USD';
+      const cur = this.offer().currency || this.st?.currency || 'USD';
       try { return new Intl.NumberFormat(undefined, {style: 'currency', currency: cur}).format(v || 0); } catch (e) { return cur + ' ' + (v || 0).toFixed(2); }
     },
     fmtDate(t) { return t ? new Date(t * 1000).toLocaleDateString(undefined, {year: 'numeric', month: 'short', day: 'numeric'}) : ''; },
     fmtTime(t) { return t ? new Date(t * 1000).toLocaleString() : ''; },
-    accountUrl() { return (this.st?.server || '') + '/account'; },
+    accountUrl() { return this.offer().account_url || ((this.st?.server || '') + '/account'); },
     updateAvailable() {
       const a = this.st?.installed_version, b = this.st?.module_latest;
       if (!a || !b) return false;
